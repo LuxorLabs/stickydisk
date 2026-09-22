@@ -1,0 +1,17 @@
+name: sticky disk generic example
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cache:
+    runs-on: tenki-standard-medium-4c-8g
+    steps:
+      - uses: actions/checkout@v6
+      - id: sticky
+        uses: LuxorLabs/stickydisk@v1
+        with:
+          key: npm-cache
+          path: ~/.npm
+      - run: npm ci
+      - run: echo "sticky disk source is ${{ steps.sticky.outputs.source }}"

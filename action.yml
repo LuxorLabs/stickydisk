@@ -1,0 +1,32 @@
+name: Sticky disk
+description: Reuse a workspace-scoped disk cache on Tenki runners
+
+inputs:
+  key:
+    description: Stable cache key
+    required: true
+  path:
+    description: Empty directory to mount
+    required: true
+  commit:
+    description: Publish a successful job's cache candidate automatically or never
+    required: false
+    default: auto
+  fail-on-error:
+    description: Fail the step when cache storage is unavailable
+    required: false
+    default: "false"
+
+outputs:
+  mounted:
+    description: Whether storage was mounted
+  source:
+    description: hit, miss, readonly, or fallback
+  generation:
+    description: Immutable cache generation when available
+
+runs:
+  using: node20
+  main: dist/main.js
+  post: dist/post.js
+  post-if: always()

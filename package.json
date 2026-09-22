@@ -1,0 +1,14 @@
+{
+  "name": "@luxorlabs/stickydisk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GitHub Actions cache disks for Tenki runners",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "smoke:buildkit": "node scripts/buildkit-lifecycle-smoke.js",
+    "e2e:buildkit-guest": "node scripts/buildkit-guest-e2e.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
