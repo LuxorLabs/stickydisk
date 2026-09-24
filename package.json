@@ -1,6 +1,6 @@
 {
   "name": "@luxorlabs/stickydisk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "GitHub Actions cache disks for Tenki runners",
   "scripts": {

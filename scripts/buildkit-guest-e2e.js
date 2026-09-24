@@ -57,7 +57,10 @@ async function execute(argumentsList = process.argv.slice(2)) {
     const buildOutput = await run(
       "docker",
       ["buildx", "build", "--builder", name, "--progress", "plain", "--output", `type=local,dest=${output}`, context],
-      { commandTimeoutMs: 90_000 },
+      {
+        commandTimeoutMs: 90_000,
+        environment: { ...environment, BUILDX_CONFIG: actionState(environment).STATE_buildkit_buildx_config },
+      },
     );
     assert.equal(fs.readFileSync(path.join(output, "payload"), "utf8"), "sticky disk cache payload\n");
     if (parsed.expect === "warm") assert.match(buildOutput, /CACHED/);

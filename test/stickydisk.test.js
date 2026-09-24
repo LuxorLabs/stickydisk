@@ -12,6 +12,7 @@ const {
   run,
   runBuildkitFinalize,
   startBuilder,
+  stopBuilder,
 } = require("../src/buildkit");
 const {
   ASSIGNMENT_MAX_DELAY_MS,
@@ -36,6 +37,7 @@ function environment(extra = {}) {
     HOME: "/home/runner",
     GITHUB_WORKSPACE: "/work/repository",
     GITHUB_OUTPUT: path.join(directory, "output"),
+    GITHUB_ENV: path.join(directory, "env"),
     GITHUB_STATE: path.join(directory, "state"),
     GITHUB_STEP_SUMMARY: path.join(directory, "summary"),
     RUNNER_TEMP: directory,
@@ -541,6 +543,8 @@ test("a failed BuildKit cleanup finalizes without publication", async () => {
     STATE_buildkit_owner: "owner-1",
     STATE_buildkit_ready: "true",
   });
+  const buildxConfig = fs.mkdtempSync(path.join(env.RUNNER_TEMP, "stickydisk-buildx-failure-"));
+  env.STATE_buildkit_buildx_config = buildxConfig;
   await assert.rejects(
     runBuildkitFinalize({
       environment: env,
@@ -553,6 +557,7 @@ test("a failed BuildKit cleanup finalizes without publication", async () => {
     /cleanup/,
   );
   assert.deepEqual(calls, [{ allocation_id: "allocation-1", commit_intent: false }]);
+  assert.equal(fs.existsSync(buildxConfig), false);
 });
 
 test("a builder name collision never removes user-owned Buildx metadata", async () => {
@@ -713,6 +718,60 @@ test("BuildKit config renders a time and size policy with optional parallelism",
     renderBuildkitConfig({ keepDuration: "192h", keepBytes: null, maxParallelism: null }),
     '[worker.oci]\n[[worker.oci.gcpolicy]]\nall = true\nkeepDuration = "192h"\n',
   );
+  assert.match(
+    renderBuildkitConfig(
+      { keepDuration: "192h", keepBytes: null, maxParallelism: null },
+      '[registry."docker.io"]\nmirrors = ["192.168.21.57:6990"]\n',
+    ),
+    /^\[registry\."docker\.io"\]\nmirrors = \["192\.168\.21\.57:6990"\]\n\n\[worker\.oci\]/,
+  );
+  assert.throws(
+    () => renderBuildkitConfig({ keepDuration: "192h" }, "[worker.oci]\ngc = true\n"),
+    /already defines worker.oci/,
+  );
+});
+
+test("remote Buildx registration uses isolated client config and preserves the runner registry mirror", async () => {
+  const env = environment({ INPUT_BUILDER_NAME: "cache" });
+  const hostConfigPath = path.join(env.RUNNER_TEMP, "host-buildkitd.toml");
+  fs.writeFileSync(hostConfigPath, '[registry."docker.io"]\nmirrors = ["192.168.21.57:6990"]\n');
+  const calls = [];
+  let owner = "";
+  const execute = (_command, args, options) => {
+    calls.push({ args, env: options.env });
+    const label = args.indexOf("--label");
+    if (label >= 0) owner = args[label + 1].split("=")[1];
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    queueMicrotask(() => {
+      if (args[0] === "port") child.stdout.emit("data", "127.0.0.1:43210\n");
+      if (args[0] === "inspect") child.stdout.emit("data", owner);
+      if (args[0] === "buildx" && args[1] === "inspect") child.stdout.emit("data", "tcp://127.0.0.1:43210");
+      child.emit("close", 0);
+    });
+    return child;
+  };
+  await startBuilder({ environment: env, execute, hostConfigPath });
+  const create = calls.find(({ args }) => args[0] === "buildx" && args[1] === "create");
+  assert.ok(create.env.BUILDX_CONFIG.startsWith(env.RUNNER_TEMP));
+  assert.ok(fs.existsSync(create.env.BUILDX_CONFIG));
+  assert.equal(fs.readFileSync(env.GITHUB_ENV, "utf8"), `BUILDX_CONFIG=${create.env.BUILDX_CONFIG}\n`);
+  const runArgs = calls[0].args;
+  const volume = runArgs[runArgs.lastIndexOf("--volume") + 1];
+  const configPath = volume.split(":")[0];
+  assert.match(fs.readFileSync(configPath, "utf8"), /mirrors = \["192\.168\.21\.57:6990"\]/);
+  const state = Object.fromEntries(
+    fs
+      .readFileSync(env.GITHUB_STATE, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => line.split("=", 2).map((value, index) => (index === 0 ? `STATE_${value}` : value))),
+  );
+  await stopBuilder({ environment: { ...env, ...state }, execute });
+  const cleanup = calls.find(({ args }) => args[0] === "buildx" && args[1] === "rm");
+  assert.equal(cleanup.env.BUILDX_CONFIG, create.env.BUILDX_CONFIG);
+  assert.equal(fs.existsSync(create.env.BUILDX_CONFIG), false);
 });
 
 test("the BuildKit daemon mounts a config sized to the sticky disk by default", async () => {
@@ -743,9 +802,12 @@ test("the BuildKit daemon mounts a config sized to the sticky disk by default", 
     "/etc/buildkit/buildkitd.toml",
     "--oci-worker-snapshotter=native",
   ]);
-  assert.equal(
-    fs.readFileSync(file, "utf8"),
-    `[worker.oci]\nmax-parallelism = 3\n[[worker.oci.gcpolicy]]\nall = true\nkeepDuration = "${DEFAULT_GC_KEEP_DURATION}"\nkeepBytes = ${Math.floor(4096000 * 0.9)}\n`,
+  assert.ok(
+    fs
+      .readFileSync(file, "utf8")
+      .endsWith(
+        `[worker.oci]\nmax-parallelism = 3\n[[worker.oci.gcpolicy]]\nall = true\nkeepDuration = "${DEFAULT_GC_KEEP_DURATION}"\nkeepBytes = ${Math.floor(4096000 * 0.9)}\n`,
+      ),
   );
   assert.match(fs.readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /GC keep duration: 192h/);
 });

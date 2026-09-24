@@ -30,14 +30,14 @@ function run(command, args, options = {}) {
   return `${result.stdout}${result.stderr}`;
 }
 
-function docker(args) {
-  return run("sudo", ["-n", "docker", ...args]);
+function docker(args, buildxConfig) {
+  return run("sudo", ["-n", "env", ...(buildxConfig ? [`BUILDX_CONFIG=${buildxConfig}`] : []), "docker", ...args]);
 }
 
 function cleanup() {
-  for (const builder of createdBuilders) {
+  for (const { name, buildxConfig } of createdBuilders) {
     try {
-      docker(["buildx", "rm", builder]);
+      docker(["buildx", "rm", name], buildxConfig);
     } catch {}
   }
   for (const container of createdContainers) {
@@ -100,9 +100,10 @@ function containerExists(container) {
 
 async function exerciseBuilder(name, requireMarker) {
   const environment = actionEnvironment(name);
-  createdBuilders.push(name);
   await executeAction("src/buildkit-main.js", environment);
   const state = stateEnvironment(environment);
+  const buildxConfig = state.STATE_buildkit_buildx_config;
+  createdBuilders.push({ name, buildxConfig });
   const container = state.STATE_buildkit_container;
   assert.match(container, new RegExp(`^${name}-daemon-[a-f0-9]+$`));
   createdContainers.push(container);
@@ -111,17 +112,20 @@ async function exerciseBuilder(name, requireMarker) {
   if (requireMarker) docker(["exec", container, "test", "-f", "/var/lib/buildkit/stickydisk-smoke-marker"]);
   else docker(["exec", container, "touch", "/var/lib/buildkit/stickydisk-smoke-marker"]);
   const contextDirectory = path.join(temporaryRoot, "context");
-  const build = docker([
-    "buildx",
-    "build",
-    "--builder",
-    name,
-    "--progress",
-    "plain",
-    "--output",
-    `type=local,dest=${path.join(temporaryRoot, name)}`,
-    contextDirectory,
-  ]);
+  const build = docker(
+    [
+      "buildx",
+      "build",
+      "--builder",
+      name,
+      "--progress",
+      "plain",
+      "--output",
+      `type=local,dest=${path.join(temporaryRoot, name)}`,
+      contextDirectory,
+    ],
+    buildxConfig,
+  );
   if (requireMarker) assert.match(build, /CACHED/);
   await executeAction("src/buildkit-post.js", { ...environment, ...stateEnvironment(environment) });
   assert.equal(containerExists(container), false);

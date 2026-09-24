@@ -39,6 +39,10 @@ function setOutput(name, value, environment = process.env) {
   appendEnvironmentFile(environment.GITHUB_OUTPUT, name, value);
 }
 
+function setEnvironment(name, value, environment = process.env) {
+  appendEnvironmentFile(environment.GITHUB_ENV, name, value);
+}
+
 function saveState(name, value, environment = process.env) {
   appendEnvironmentFile(environment.GITHUB_STATE, name, value);
 }
@@ -77,6 +81,7 @@ module.exports = {
   resolveTarget,
   safeValue,
   saveState,
+  setEnvironment,
   setOutput,
   stateDirectory,
   summary,

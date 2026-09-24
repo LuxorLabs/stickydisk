@@ -2,12 +2,22 @@ const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { input, requiredInput, resolveTarget, saveState, setOutput, stateDirectory, summary } = require("./action");
+const {
+  input,
+  requiredInput,
+  resolveTarget,
+  saveState,
+  setEnvironment,
+  setOutput,
+  stateDirectory,
+  summary,
+} = require("./action");
 const { runFinalize, runMount } = require("./stickydisk");
 
 const DEFAULT_GC_KEEP_DURATION = "192h";
 const DEFAULT_GC_KEEP_RATIO = 0.9;
 const CONFIG_MOUNT = "/etc/buildkit/buildkitd.toml";
+const HOST_CONFIG = "/etc/buildkit/buildkitd.toml";
 
 function durationInput(name, environment, fallback) {
   const value = input(name, environment) || fallback;
@@ -36,15 +46,17 @@ function gcKeepBytes(environment, statePath, statfs) {
   }
 }
 
-function renderBuildkitConfig({ keepDuration, keepBytes, maxParallelism }) {
+function renderBuildkitConfig({ keepDuration, keepBytes, maxParallelism }, hostConfig = "") {
+  if (/^\s*\[\[?worker\.oci(?:\.|\])/m.test(hostConfig))
+    throw new Error("The runner BuildKit config already defines worker.oci; cannot merge sticky disk GC settings");
   const lines = ["[worker.oci]"];
   if (maxParallelism) lines.push(`max-parallelism = ${maxParallelism}`);
   lines.push("[[worker.oci.gcpolicy]]", "all = true", `keepDuration = "${keepDuration}"`);
   if (keepBytes) lines.push(`keepBytes = ${keepBytes}`);
-  return `${lines.join("\n")}\n`;
+  return `${hostConfig.trimEnd()}${hostConfig ? "\n\n" : ""}${lines.join("\n")}\n`;
 }
 
-function writeBuildkitConfig(environment, statePath, owner, statfs) {
+function writeBuildkitConfig(environment, statePath, owner, statfs, hostConfigPath = HOST_CONFIG) {
   const directory = stateDirectory(environment);
   if (!directory) throw new Error("RUNNER_TEMP is required to write the BuildKit configuration");
   const settings = {
@@ -53,7 +65,8 @@ function writeBuildkitConfig(environment, statePath, owner, statfs) {
     maxParallelism: integerInput("max-parallelism", environment, { min: 1 }),
   };
   const file = path.join(directory, `stickydisk-buildkitd-${owner}.toml`);
-  fs.writeFileSync(file, renderBuildkitConfig(settings), { encoding: "utf8", mode: 0o600 });
+  const hostConfig = fs.existsSync(hostConfigPath) ? fs.readFileSync(hostConfigPath, "utf8") : "";
+  fs.writeFileSync(file, renderBuildkitConfig(settings, hostConfig), { encoding: "utf8", mode: 0o600 });
   return { file, settings };
 }
 
@@ -69,7 +82,11 @@ function run(command, args, options = {}) {
   const execute = options.execute || spawn;
   const operation = options.operation || "BuildKit Docker command";
   return new Promise((resolve, reject) => {
-    const child = execute(command, args, { stdio: ["ignore", "pipe", "pipe"], shell: false });
+    const child = execute(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      env: options.environment || process.env,
+    });
     let stdout = "";
     let settled = false;
     const finish = (callback) => {
@@ -133,9 +150,20 @@ async function startBuilder(options = {}) {
   const owner = ownershipToken();
   const container = `${name}-daemon-${owner}`;
   const image = input("image", environment) || "moby/buildkit:buildx-stable-1";
-  const config = writeBuildkitConfig(environment, statePath, owner, options.statfs || fs.statfsSync);
+  const config = writeBuildkitConfig(
+    environment,
+    statePath,
+    owner,
+    options.statfs || fs.statfsSync,
+    options.hostConfigPath,
+  );
+  const buildxConfig = fs.mkdtempSync(path.join(stateDirectory(environment), `stickydisk-buildx-${owner}-`), {
+    mode: 0o700,
+  });
+  const builderOptions = { ...options, environment: { ...environment, BUILDX_CONFIG: buildxConfig } };
   saveState("buildkit_container", container, environment);
   saveState("buildkit_owner", owner, environment);
+  saveState("buildkit_buildx_config", buildxConfig, environment);
   try {
     await run(
       "docker",
@@ -160,27 +188,32 @@ async function startBuilder(options = {}) {
         CONFIG_MOUNT,
         "--oci-worker-snapshotter=native",
       ],
-      { ...options, operation: "BuildKit daemon start" },
+      { ...builderOptions, operation: "BuildKit daemon start" },
     );
     saveState("buildkit_container_created", "true", environment);
     const endpoint = endpointFromPort(
-      await run("docker", ["port", container, "1234/tcp"], { ...options, operation: "BuildKit daemon port discovery" }),
+      await run("docker", ["port", container, "1234/tcp"], {
+        ...builderOptions,
+        operation: "BuildKit daemon port discovery",
+      }),
     );
     await run("docker", ["buildx", "create", "--name", name, "--driver", "remote", "--use", endpoint], {
-      ...options,
+      ...builderOptions,
       operation: "BuildKit builder registration",
     });
     saveState("buildkit_builder", name, environment);
     saveState("buildkit_builder_endpoint", endpoint, environment);
     saveState("buildkit_builder_created", "true", environment);
     saveState("buildkit_ready", "true", environment);
+    setEnvironment("BUILDX_CONFIG", buildxConfig, environment);
   } catch (error) {
-    if (await containerOwned(container, owner, options)) {
-      await run("docker", ["stop", "--time", "20", container], options).catch(() => {});
-      await run("docker", ["rm", container], options)
+    if (await containerOwned(container, owner, builderOptions)) {
+      await run("docker", ["stop", "--time", "20", container], builderOptions).catch(() => {});
+      await run("docker", ["rm", container], builderOptions)
         .then(() => saveState("buildkit_container_created", "false", environment))
         .catch(() => {});
     }
+    fs.rmSync(buildxConfig, { recursive: true, force: true });
     throw error;
   }
   setOutput("name", name, environment);
@@ -204,16 +237,22 @@ async function stopBuilder(options = {}) {
   const endpoint = environment.STATE_buildkit_builder_endpoint;
   const container = environment.STATE_buildkit_container;
   const owner = environment.STATE_buildkit_owner;
+  const buildxConfig = environment.STATE_buildkit_buildx_config;
+  const builderOptions = buildxConfig
+    ? { ...options, environment: { ...environment, BUILDX_CONFIG: buildxConfig } }
+    : options;
   const failures = [];
-  const ownsContainer = await containerOwned(container, owner, options);
+  const ownsContainer = await containerOwned(container, owner, builderOptions);
   const ownsBuilder =
-    environment.STATE_buildkit_builder_created === "true" && (await builderOwned(name, endpoint, options));
+    environment.STATE_buildkit_builder_created === "true" && (await builderOwned(name, endpoint, builderOptions));
   if (environment.STATE_buildkit_container_created === "true" && !ownsContainer) failures.push("daemon ownership");
   if (environment.STATE_buildkit_builder_created === "true" && !ownsBuilder) failures.push("builder ownership");
   if (ownsContainer)
-    await run("docker", ["stop", "--time", "20", container], options).catch(() => failures.push("daemon"));
-  if (ownsBuilder) await run("docker", ["buildx", "rm", name], options).catch(() => failures.push("builder metadata"));
-  if (ownsContainer) await run("docker", ["rm", container], options).catch(() => failures.push("daemon"));
+    await run("docker", ["stop", "--time", "20", container], builderOptions).catch(() => failures.push("daemon"));
+  if (ownsBuilder)
+    await run("docker", ["buildx", "rm", name], builderOptions).catch(() => failures.push("builder metadata"));
+  if (ownsContainer) await run("docker", ["rm", container], builderOptions).catch(() => failures.push("daemon"));
+  if (buildxConfig) fs.rmSync(buildxConfig, { recursive: true, force: true });
   if (failures.length) throw new Error("BuildKit cleanup did not complete");
 }
 
