@@ -344,7 +344,7 @@ test("a timed-out mount waits for confirmed cleanup before using local storage",
               clock += 5_000;
               throw new Error("mount request timed out");
             }
-            if (clock < 25_000) {
+            if (clock < 100_000) {
               return new Response("mount pending", { status: 425, headers: { "retry-after": "2" } });
             }
             return Response.json({ mounted: false, source: "fallback", fallback_reason: "storage_unavailable" });
@@ -355,7 +355,7 @@ test("a timed-out mount waits for confirmed cleanup before using local storage",
   assert.equal(fields.source, "fallback");
   assert.equal(fields.mounted, false);
   assert.ok(calls > 3);
-  assert.ok(clock > ASSIGNMENT_RETRY_BUDGET_MS);
+  assert.ok(clock > 95_000);
   assert.ok(clock < MOUNT_RECOVERY_RETRY_BUDGET_MS + 5_000);
 });
 
