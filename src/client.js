@@ -4,6 +4,7 @@ const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_ATTEMPTS = 3;
 const MAX_RESPONSE_BYTES = 16 * 1024;
 const ASSIGNMENT_RETRY_BUDGET_MS = 15_000;
+const MOUNT_RECOVERY_RETRY_BUDGET_MS = 35_000;
 const ASSIGNMENT_MIN_DELAY_MS = 250;
 const ASSIGNMENT_MAX_DELAY_MS = 5_000;
 
@@ -73,13 +74,16 @@ async function request(route, body, options = {}) {
     } catch (error) {
       outcome = exceptionOutcome(error, context.route, attempt, ambiguousMount);
     }
+    if (!ambiguousMount && outcome.ambiguousMount) {
+      context.mountRecoveryDeadline = context.now() + MOUNT_RECOVERY_RETRY_BUDGET_MS;
+    }
     ambiguousMount ||= outcome.ambiguousMount;
     if (outcome.type === "success") return outcome.payload;
     if (outcome.type === "terminal") throw outcome.error;
     if (outcome.type === "assignment") {
       const assignmentRetryDelay = assignmentDelay(
         outcome.response,
-        context.assignmentDeadline - context.now(),
+        (ambiguousMount ? context.mountRecoveryDeadline : context.assignmentDeadline) - context.now(),
         context.random,
         context.now,
       );
@@ -240,6 +244,7 @@ module.exports = {
   ASSIGNMENT_MAX_DELAY_MS,
   ASSIGNMENT_MIN_DELAY_MS,
   ASSIGNMENT_RETRY_BUDGET_MS,
+  MOUNT_RECOVERY_RETRY_BUDGET_MS,
   EXPLICIT_FALLBACK_CODES,
   StickyDiskAmbiguousMountError,
   StickyDiskDegradedError,

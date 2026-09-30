@@ -17,6 +17,8 @@ const {
 const {
   ASSIGNMENT_MAX_DELAY_MS,
   ASSIGNMENT_MIN_DELAY_MS,
+  ASSIGNMENT_RETRY_BUDGET_MS,
+  MOUNT_RECOVERY_RETRY_BUDGET_MS,
   StickyDiskAmbiguousMountError,
   StickyDiskDegradedError,
   StickyDiskError,
@@ -318,6 +320,43 @@ test("an invalid success remains ambiguous when assignment retries exhaust", asy
     ),
     StickyDiskAmbiguousMountError,
   );
+});
+
+test("a timed-out mount waits for confirmed cleanup before using local storage", async () => {
+  let clock = 0;
+  let calls = 0;
+  const fields = await runMount({
+    environment: environment(),
+    mount: () =>
+      request(
+        "/v1/stickydisk/mount",
+        { key: "go-mod", path: "/workspace/go-mod", commit: "never", fail_on_error: false },
+        {
+          environment: environment(),
+          now: () => clock,
+          random: () => 0,
+          sleep: async (milliseconds) => {
+            clock += milliseconds;
+          },
+          fetchImpl: async () => {
+            calls += 1;
+            if (calls === 1) {
+              clock += 5_000;
+              throw new Error("mount request timed out");
+            }
+            if (clock < 25_000) {
+              return new Response("mount pending", { status: 425, headers: { "retry-after": "2" } });
+            }
+            return Response.json({ mounted: false, source: "fallback", fallback_reason: "storage_unavailable" });
+          },
+        },
+      ),
+  });
+  assert.equal(fields.source, "fallback");
+  assert.equal(fields.mounted, false);
+  assert.ok(calls > 3);
+  assert.ok(clock > ASSIGNMENT_RETRY_BUDGET_MS);
+  assert.ok(clock < MOUNT_RECOVERY_RETRY_BUDGET_MS + 5_000);
 });
 
 test("explicit pre-attachment allocation failures still fall back", async () => {
