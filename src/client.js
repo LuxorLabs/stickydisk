@@ -1,9 +1,10 @@
 const crypto = require("node:crypto");
 
 const REQUEST_TIMEOUT_MS = 5_000;
+const MOUNT_REQUEST_TIMEOUT_MS = 35_000;
 const MAX_ATTEMPTS = 3;
 const MAX_RESPONSE_BYTES = 16 * 1024;
-const ASSIGNMENT_RETRY_BUDGET_MS = 15_000;
+const ASSIGNMENT_RETRY_BUDGET_MS = MOUNT_REQUEST_TIMEOUT_MS + 15_000;
 const ASSIGNMENT_MIN_DELAY_MS = 250;
 const ASSIGNMENT_MAX_DELAY_MS = 5_000;
 
@@ -117,7 +118,10 @@ function requestContext(route, body, options) {
 
 async function responseOutcome(context, attempt, ambiguousMount) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    context.route === "/v1/stickydisk/mount" ? MOUNT_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+  );
   try {
     const response = await sendRequest(context, controller.signal);
     const payload = await responseBody(response);

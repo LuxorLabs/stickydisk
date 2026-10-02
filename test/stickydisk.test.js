@@ -15,6 +15,7 @@ const {
   stopBuilder,
 } = require("../src/buildkit");
 const {
+  ASSIGNMENT_RETRY_BUDGET_MS,
   ASSIGNMENT_MAX_DELAY_MS,
   ASSIGNMENT_MIN_DELAY_MS,
   StickyDiskAmbiguousMountError,
@@ -103,6 +104,61 @@ test("retries delayed assignment responses with one stable idempotency key", asy
   assert.equal(result.generation, "g1");
 });
 
+test("a mount that grows a disk for six seconds completes on its first request", async () => {
+  let calls = 0;
+  const result = await request(
+    "/v1/stickydisk/mount",
+    {},
+    {
+      environment: environment(),
+      fetchImpl: (_url, { signal }) => {
+        calls += 1;
+        if (calls > 1) return Promise.resolve(new Response("mount still in progress", { status: 409 }));
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(
+            () => resolve(Response.json({ mounted: true, source: "hit", allocation_id: "allocation-1" })),
+            6_000,
+          );
+          signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(new Error("request aborted"));
+            },
+            { once: true },
+          );
+        });
+      },
+    },
+  );
+  assert.equal(result.source, "hit");
+  assert.equal(calls, 1);
+});
+
+test("a slow pending mount retries before falling back", async () => {
+  let clock = 0;
+  let calls = 0;
+  const fields = await runMount({
+    environment: environment(),
+    now: () => clock,
+    random: () => 0,
+    sleep: async (milliseconds) => {
+      clock += milliseconds;
+    },
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        clock += 20_000;
+        return new Response("assignment pending", { status: 425, headers: { "retry-after": "2" } });
+      }
+      return Response.json({ mounted: true, source: "hit", generation: "g1", allocation_id: "allocation-1" });
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(fields.source, "hit");
+  assert.equal(fields.mounted, true);
+});
+
 test("exhausted assignment retries fail within their separate budget", async () => {
   let clock = 0;
   const delays = [];
@@ -123,7 +179,9 @@ test("exhausted assignment retries fail within their separate budget", async () 
     ),
     /did not become ready/,
   );
-  assert.deepEqual(delays, [2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000]);
+  assert.ok(delays.every((milliseconds) => milliseconds === 2_000));
+  assert.ok(clock <= ASSIGNMENT_RETRY_BUDGET_MS);
+  assert.ok(clock > ASSIGNMENT_RETRY_BUDGET_MS - 2_000);
 });
 
 test("assignment exhaustion falls back when the action is not strict", async () => {
