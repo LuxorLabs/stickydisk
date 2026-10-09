@@ -2,7 +2,7 @@ const crypto = require("node:crypto");
 
 const REQUEST_TIMEOUT_MS = 5_000;
 const MOUNT_REQUEST_TIMEOUT_MS = 35_000;
-const MAX_ATTEMPTS = 3;
+const DEFAULT_RETRY_POLICY = { retries: 2, delayMs: 150, maxDelayMs: 5_000 };
 const MAX_RESPONSE_BYTES = 16 * 1024;
 const ASSIGNMENT_RETRY_BUDGET_MS = MOUNT_REQUEST_TIMEOUT_MS + 15_000;
 const MOUNT_RECOVERY_RETRY_BUDGET_MS = 120_000;
@@ -38,9 +38,8 @@ function retryable(status) {
   return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
 }
 
-function delay(attempt, sleep, random = Math.random) {
-  const jitter = Math.floor(random() * 100);
-  return sleep(150 * 2 ** attempt + jitter);
+function retryDelay(policy, attempt, random = Math.random) {
+  return Math.min(policy.maxDelayMs, policy.delayMs * 2 ** Math.min(attempt, 30)) + Math.floor(random() * 100);
 }
 
 function assignmentDelay(response, remainingBudget, random = Math.random, now = Date.now) {
@@ -68,12 +67,13 @@ function validResponse(route, payload) {
 async function request(route, body, options = {}) {
   const context = requestContext(route, body, options);
   let ambiguousMount = false;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt <= context.retry.retries; attempt += 1) {
+    const lastAttempt = attempt === context.retry.retries;
     let outcome;
     try {
-      outcome = await responseOutcome(context, attempt, ambiguousMount);
+      outcome = await responseOutcome(context, lastAttempt, ambiguousMount);
     } catch (error) {
-      outcome = exceptionOutcome(error, context.route, attempt, ambiguousMount);
+      outcome = exceptionOutcome(error, context.route, lastAttempt, ambiguousMount);
     }
     if (!ambiguousMount && outcome.ambiguousMount) {
       context.mountRecoveryDeadline = context.now() + MOUNT_RECOVERY_RETRY_BUDGET_MS;
@@ -92,7 +92,7 @@ async function request(route, body, options = {}) {
       await context.sleep(assignmentRetryDelay);
       attempt -= 1;
     } else {
-      await delay(attempt, context.sleep, context.random);
+      await context.sleep(retryDelay(context.retry, attempt, context.random));
     }
   }
   throw new StickyDiskError("Sticky disk request failed");
@@ -114,23 +114,25 @@ function requestContext(route, body, options) {
       .digest("hex"),
     now,
     random: options.random || Math.random,
+    retry: {
+      ...DEFAULT_RETRY_POLICY,
+      attemptTimeoutMs: route === "/v1/stickydisk/mount" ? MOUNT_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+      ...definedFields(options.retry),
+    },
     route,
     sleep: options.sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
     token,
   };
 }
 
-async function responseOutcome(context, attempt, ambiguousMount) {
+async function responseOutcome(context, lastAttempt, ambiguousMount) {
   const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    context.route === "/v1/stickydisk/mount" ? MOUNT_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
-  );
+  const timeout = setTimeout(() => controller.abort(), context.retry.attemptTimeoutMs);
   try {
     const response = await sendRequest(context, controller.signal);
     const payload = await responseBody(response);
-    if (response.ok) return successfulResponseOutcome(context.route, payload, attempt);
-    return failedResponseOutcome(context.route, response, payload, attempt, ambiguousMount);
+    if (response.ok) return successfulResponseOutcome(context.route, payload, lastAttempt);
+    return failedResponseOutcome(context.route, response, payload, lastAttempt, ambiguousMount);
   } finally {
     clearTimeout(timeout);
   }
@@ -151,14 +153,18 @@ async function sendRequest(context, signal) {
   });
 }
 
-function successfulResponseOutcome(route, payload, attempt) {
+function successfulResponseOutcome(route, payload, lastAttempt) {
   if (validResponse(route, payload)) return { type: "success", payload, ambiguousMount: false };
   if (route === "/v1/stickydisk/mount")
-    return retryOrTerminal(attempt, true, new StickyDiskAmbiguousMountError("Sticky disk mount outcome is unknown"));
-  return retryOrTerminal(attempt, false, new StickyDiskError("Sticky disk response is invalid"));
+    return retryOrTerminal(
+      lastAttempt,
+      true,
+      new StickyDiskAmbiguousMountError("Sticky disk mount outcome is unknown"),
+    );
+  return retryOrTerminal(lastAttempt, false, new StickyDiskError("Sticky disk response is invalid"));
 }
 
-function failedResponseOutcome(route, response, payload, attempt, ambiguousMount) {
+function failedResponseOutcome(route, response, payload, lastAttempt, ambiguousMount) {
   const classified = classifiedResponseError(payload, ambiguousMount);
   if (classified) return { type: "terminal", error: classified, ambiguousMount };
   const uncertain =
@@ -166,7 +172,7 @@ function failedResponseOutcome(route, response, payload, attempt, ambiguousMount
   if (response.status === 425) return { type: "assignment", response, ambiguousMount: uncertain };
   const error = responseError(response.status, uncertain);
   return retryable(response.status)
-    ? retryOrTerminal(attempt, uncertain, error)
+    ? retryOrTerminal(lastAttempt, uncertain, error)
     : { type: "terminal", error, ambiguousMount: uncertain };
 }
 
@@ -178,7 +184,7 @@ function classifiedResponseError(payload, ambiguousMount) {
     : new StickyDiskSafeFallbackError("Sticky disk allocation is unavailable");
 }
 
-function exceptionOutcome(error, route, attempt, ambiguousMount) {
+function exceptionOutcome(error, route, lastAttempt, ambiguousMount) {
   if (
     error instanceof StickyDiskDegradedError ||
     error instanceof StickyDiskAmbiguousMountError ||
@@ -192,11 +198,15 @@ function exceptionOutcome(error, route, attempt, ambiguousMount) {
     : error instanceof StickyDiskError
       ? error
       : new StickyDiskError("Sticky disk request failed");
-  return retryOrTerminal(attempt, uncertain, terminalError);
+  return retryOrTerminal(lastAttempt, uncertain, terminalError);
 }
 
-function retryOrTerminal(attempt, ambiguousMount, error) {
-  return attempt === MAX_ATTEMPTS - 1 ? { type: "terminal", error, ambiguousMount } : { type: "retry", ambiguousMount };
+function retryOrTerminal(lastAttempt, ambiguousMount, error) {
+  return lastAttempt ? { type: "terminal", error, ambiguousMount } : { type: "retry", ambiguousMount };
+}
+
+function definedFields(value = {}) {
+  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined && field !== null));
 }
 
 function responseError(status, ambiguousMount) {
@@ -249,6 +259,7 @@ module.exports = {
   ASSIGNMENT_MIN_DELAY_MS,
   ASSIGNMENT_RETRY_BUDGET_MS,
   MOUNT_RECOVERY_RETRY_BUDGET_MS,
+  DEFAULT_RETRY_POLICY,
   EXPLICIT_FALLBACK_CODES,
   StickyDiskAmbiguousMountError,
   StickyDiskDegradedError,

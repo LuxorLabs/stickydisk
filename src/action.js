@@ -20,6 +20,24 @@ function booleanInput(name, environment = process.env) {
   throw new Error(`Input ${name} must be true or false`);
 }
 
+const DURATION_UNITS_MS = { ms: 1, s: 1_000, m: 60_000 };
+
+function durationInput(name, environment = process.env, { min = 0 } = {}) {
+  const value = input(name, environment);
+  if (!value) return undefined;
+  const match = /^([0-9]+)(ms|s|m)$/.exec(value);
+  const milliseconds = match ? Number(match[1]) * DURATION_UNITS_MS[match[2]] : NaN;
+  if (!(milliseconds >= min)) throw new Error(`Input ${name} must be a duration such as 500ms, 10s or 1m`);
+  return milliseconds;
+}
+
+function integerInput(name, environment = process.env) {
+  const value = input(name, environment);
+  if (!value) return undefined;
+  if (!/^[0-9]+$/.test(value)) throw new Error(`Input ${name} must be a non-negative integer`);
+  return Number(value);
+}
+
 function commitInput(environment = process.env) {
   const value = input("commit", environment) || "auto";
   if (value !== "auto" && value !== "never") throw new Error("Input commit must be auto or never");
@@ -75,7 +93,9 @@ function resolveTarget(value, environment = process.env) {
 module.exports = {
   booleanInput,
   commitInput,
+  durationInput,
   input,
+  integerInput,
   maskSecret,
   requiredInput,
   resolveTarget,

@@ -16,6 +16,7 @@ const {
 } = require("../src/buildkit");
 const {
   ASSIGNMENT_RETRY_BUDGET_MS,
+  DEFAULT_RETRY_POLICY,
   MOUNT_RECOVERY_RETRY_BUDGET_MS,
   ASSIGNMENT_MAX_DELAY_MS,
   ASSIGNMENT_MIN_DELAY_MS,
@@ -228,39 +229,153 @@ test("assignment retry delays clamp hostile Retry-After values", () => {
   );
 });
 
-test("storage degradation fails without publishing fallback outputs", async () => {
-  const env = environment();
-  await assert.rejects(
-    runMount({
-      environment: env,
-      mount: () =>
-        request(
-          "/v1/stickydisk/mount",
-          {},
-          { environment: env, fetchImpl: async () => Response.json({ code: "storage_degraded" }, { status: 503 }) },
-        ),
-    }),
-    StickyDiskDegradedError,
-  );
-  assert.equal(fs.existsSync(env.GITHUB_OUTPUT), false);
-  assert.match(fs.readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /Storage state: unknown/);
+function mountThrough(env, extra) {
+  return (body, options) =>
+    request("/v1/stickydisk/mount", body, { ...options, environment: env, sleep: async () => {}, ...extra });
+}
+
+test("unconfirmed mounts fall back to an uncached job that never requests publication", async () => {
+  const cases = [
+    { reason: "storage degraded", fetchImpl: async () => Response.json({ code: "storage_degraded" }, { status: 503 }) },
+    { reason: "mount outcome unknown", fetchImpl: async () => new Response("", { status: 500 }) },
+  ];
+  for (const { reason, fetchImpl } of cases) {
+    const env = environment();
+    const fields = await runMount({ environment: env, mount: mountThrough(env, { fetchImpl }) });
+    assert.equal(fields.source, "fallback");
+    assert.equal(fields.mounted, false);
+    assert.equal(fields.fallbackReason, reason);
+    assert.equal(fields.publication, "not requested");
+    assert.match(fs.readFileSync(env.GITHUB_OUTPUT, "utf8"), /source=fallback/);
+    assert.equal(fs.existsSync(env.GITHUB_STATE), false);
+  }
 });
 
-test("ambiguous mount failures fail instead of claiming an uncached fallback", async () => {
-  const env = environment();
-  await assert.rejects(
-    runMount({
-      environment: env,
-      mount: () =>
-        request(
-          "/v1/stickydisk/mount",
-          {},
-          { environment: env, sleep: async () => {}, fetchImpl: async () => new Response("", { status: 500 }) },
-        ),
+test("strict mode fails unconfirmed mounts without publishing fallback outputs", async () => {
+  const cases = [
+    {
+      error: StickyDiskDegradedError,
+      fetchImpl: async () => Response.json({ code: "storage_degraded" }, { status: 503 }),
+    },
+    { error: StickyDiskAmbiguousMountError, fetchImpl: async () => new Response("", { status: 500 }) },
+  ];
+  for (const { error, fetchImpl } of cases) {
+    const env = environment({ "INPUT_FAIL-ON-ERROR": "true" });
+    await assert.rejects(runMount({ environment: env, mount: mountThrough(env, { fetchImpl }) }), error);
+    assert.equal(fs.existsSync(env.GITHUB_OUTPUT), false);
+    assert.match(fs.readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /Storage state: unknown/);
+  }
+});
+
+test("the retries input sets how many requests a failing mount makes", async () => {
+  const cases = [
+    { retries: undefined, want: DEFAULT_RETRY_POLICY.retries + 1 },
+    { retries: "0", want: 1 },
+    { retries: "4", want: 5 },
+  ];
+  for (const { retries, want } of cases) {
+    const env = environment(retries === undefined ? {} : { INPUT_RETRIES: retries });
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      return new Response("", { status: 503 });
+    };
+    const fields = await runMount({ environment: env, mount: mountThrough(env, { fetchImpl }) });
+    assert.equal(fields.source, "fallback");
+    assert.equal(calls, want);
+  }
+});
+
+test("a mount that recovers within its retries is used", async () => {
+  const env = environment({ INPUT_RETRIES: "3" });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return calls < 4
+      ? new Response("", { status: 503 })
+      : Response.json({ mounted: true, source: "hit", allocation_id: "allocation-1", publication: "pending" });
+  };
+  const fields = await runMount({ environment: env, mount: mountThrough(env, { fetchImpl }) });
+  assert.equal(fields.source, "hit");
+  assert.equal(fields.mounted, true);
+  assert.equal(calls, 4);
+});
+
+test("retry waits start at retry-delay and double up to retry-max-delay", async () => {
+  const env = environment({ INPUT_RETRIES: "4", "INPUT_RETRY-DELAY": "1s", "INPUT_RETRY-MAX-DELAY": "3s" });
+  const waits = [];
+  await runMount({
+    environment: env,
+    mount: mountThrough(env, {
+      random: () => 0,
+      sleep: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+      fetchImpl: async () => new Response("", { status: 503 }),
     }),
-    StickyDiskAmbiguousMountError,
-  );
-  assert.equal(fs.existsSync(env.GITHUB_OUTPUT), false);
+  });
+  assert.deepEqual(waits, [1_000, 2_000, 3_000, 3_000]);
+});
+
+test("retry waits stay finite and capped however many retries are configured", async () => {
+  const env = environment({ INPUT_RETRIES: "1100", "INPUT_RETRY-DELAY": "0ms", "INPUT_RETRY-MAX-DELAY": "1s" });
+  const waits = [];
+  await runMount({
+    environment: env,
+    mount: mountThrough(env, {
+      random: () => 0,
+      sleep: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+      fetchImpl: async () => new Response("", { status: 503 }),
+    }),
+  });
+  assert.equal(waits.length, 1100);
+  assert.ok(waits.every((milliseconds) => Number.isFinite(milliseconds) && milliseconds <= 1_000));
+});
+
+test("attempt-timeout aborts a request that takes too long", async () => {
+  const env = environment({ INPUT_RETRIES: "0", "INPUT_ATTEMPT-TIMEOUT": "20ms" });
+  const started = Date.now();
+  const fields = await runMount({
+    environment: env,
+    mount: mountThrough(env, {
+      fetchImpl: (url, init) =>
+        new Promise((resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))),
+    }),
+  });
+  assert.equal(fields.fallbackReason, "mount outcome unknown");
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test("finalization uses the same retry inputs", async () => {
+  let received;
+  await runFinalize({
+    environment: environment({ STATE_allocation_id: "a1", INPUT_RETRIES: "0", "INPUT_ATTEMPT-TIMEOUT": "2s" }),
+    finalize: async (body, options) => {
+      received = options.retry;
+      return { publication: "pending" };
+    },
+  });
+  assert.equal(received.retries, 0);
+  assert.equal(received.attemptTimeoutMs, 2_000);
+});
+
+test("invalid retry inputs fail the step even without fail-on-error", async () => {
+  const cases = [
+    [{ INPUT_RETRIES: "-1" }, /retries must be a non-negative integer/],
+    [{ INPUT_RETRIES: "two" }, /retries must be a non-negative integer/],
+    [{ "INPUT_RETRY-DELAY": "150" }, /retry-delay must be a duration/],
+    [{ "INPUT_RETRY-MAX-DELAY": "1h" }, /retry-max-delay must be a duration/],
+    [{ "INPUT_ATTEMPT-TIMEOUT": "fast" }, /attempt-timeout must be a duration/],
+    [{ "INPUT_ATTEMPT-TIMEOUT": "0ms" }, /attempt-timeout must be a duration/],
+  ];
+  for (const [inputs, message] of cases) {
+    await assert.rejects(
+      runMount({ environment: environment(inputs), mount: async () => ({ mounted: false, source: "miss" }) }),
+      message,
+    );
+  }
 });
 
 test("mount conflicts and exhausted transport failures remain ambiguous", async () => {

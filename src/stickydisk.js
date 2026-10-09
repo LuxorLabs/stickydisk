@@ -1,6 +1,8 @@
 const {
   commitInput,
   booleanInput,
+  durationInput,
+  integerInput,
   maskSecret,
   requiredInput,
   resolveTarget,
@@ -17,6 +19,15 @@ const {
 } = require("./client");
 
 const SOURCES = new Set(["hit", "miss", "readonly", "fallback"]);
+
+function retryInputs(environment) {
+  return {
+    retries: integerInput("retries", environment),
+    delayMs: durationInput("retry-delay", environment),
+    maxDelayMs: durationInput("retry-max-delay", environment),
+    attemptTimeoutMs: durationInput("attempt-timeout", environment, { min: 1 }),
+  };
+}
 
 function responseFields(response) {
   const source = SOURCES.has(response.source) ? response.source : "fallback";
@@ -54,6 +65,7 @@ async function runMount(options = {}) {
   const client = options.mount || mount;
   const failOnError = booleanInput("fail-on-error", environment);
   const commit = commitInput(environment);
+  const retry = retryInputs(environment);
   const request = {
     key: requiredInput("key", environment),
     path: resolveTarget(requiredInput("path", environment), environment),
@@ -61,7 +73,7 @@ async function runMount(options = {}) {
     fail_on_error: failOnError,
   };
   try {
-    const fields = responseFields(await client(request, options));
+    const fields = responseFields(await client(request, { ...options, retry }));
     if (failOnError && fields.source === "fallback") throw new StickyDiskError("Sticky disk storage is unavailable");
     publishFields(fields, environment);
     if (fields.mounted && fields.allocationId) {
@@ -71,20 +83,28 @@ async function runMount(options = {}) {
     mountSummary(fields, environment);
     return fields;
   } catch (error) {
-    if (error instanceof StickyDiskDegradedError || error instanceof StickyDiskAmbiguousMountError) {
-      summary(
-        ["### Sticky disk", "- Mount mode: degraded", "- Storage state: unknown", "- Publication: not requested"],
-        environment,
-      );
+    // Mount errors run the job uncached unless fail-on-error is set, so a cache problem never fails the job.
+    const unconfirmed = error instanceof StickyDiskDegradedError || error instanceof StickyDiskAmbiguousMountError;
+    if (failOnError) {
+      if (unconfirmed) {
+        summary(
+          ["### Sticky disk", "- Mount mode: degraded", "- Storage state: unknown", "- Publication: not requested"],
+          environment,
+        );
+      }
       throw error;
     }
-    if (failOnError) throw error;
     const fields = {
       mounted: false,
       source: "fallback",
       generation: "",
       allocationId: "",
-      fallbackReason: "storage unavailable",
+      fallbackReason:
+        error instanceof StickyDiskDegradedError
+          ? "storage degraded"
+          : error instanceof StickyDiskAmbiguousMountError
+            ? "mount outcome unknown"
+            : "storage unavailable",
       previousOutcome: "",
       publication: "not requested",
     };
@@ -101,10 +121,11 @@ async function runFinalize(options = {}) {
   if (!allocationId) return null;
   const commitIntent = options.commitIntent ?? environment.STATE_commit_intent === "true";
   const failOnError = booleanInput("fail-on-error", environment);
+  const retry = retryInputs(environment);
   try {
     const response = await (options.finalize || finalize)(
       { allocation_id: allocationId, commit_intent: commitIntent },
-      options,
+      { ...options, retry },
     );
     const publication = typeof response.publication === "string" ? response.publication : "pending";
     summary(["### Sticky disk finalization", `- Publication: ${publication}`], environment);

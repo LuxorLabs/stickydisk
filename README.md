@@ -14,8 +14,20 @@ The action does not accept storage names, pool identifiers, or other storage acc
 
 `commit` defaults to `auto` and asks the control plane to publish after a successful job.
 Set it to `never` when a job should read the published cache without publishing its own writes.
-Before attachment, storage errors leave the job uncached and set `source=fallback` unless `fail-on-error` is `true`.
-A `storage_degraded` response always fails the step, because the mount outcome is unknown and publishing could expose damaged data.
+Failed requests to the cache service are retried with exponential backoff.
+`retries` sets how many retries follow the first attempt (default `2`), `retry-delay` the wait before the first retry (default `150ms`, doubling each time), `retry-max-delay` the longest wait (default `5s`), and `attempt-timeout` the longest a single request may take (default `35s` for the mount, `5s` for finalization).
+When the retries run out, or the service reports degraded storage, the job continues uncached with `source=fallback` unless `fail-on-error` is `true`.
+An unconfirmed mount is never finalized, so the service cannot publish it.
+
+```yaml
+- uses: LuxorLabs/stickydisk@v1
+  with:
+    key: npm-cache
+    path: ~/.npm
+    retries: 1
+    attempt-timeout: 4s
+```
+
 Storage loss after attachment can cancel the owning job to prevent publication of damaged cache data.
 
 The action writes `mounted`, `source`, and `generation` outputs.

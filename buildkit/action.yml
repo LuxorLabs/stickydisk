@@ -16,6 +16,21 @@ inputs:
     description: Fail the step when cache storage is unavailable
     required: false
     default: "false"
+  retries:
+    description: Retries after a failed request to the cache service, before running uncached
+    required: false
+    default: "2"
+  retry-delay:
+    description: Wait before the first retry; it doubles on each retry up to retry-max-delay
+    required: false
+    default: 150ms
+  retry-max-delay:
+    description: Longest wait between retries
+    required: false
+    default: 5s
+  attempt-timeout:
+    description: Longest a single request may take; defaults to 35s for the mount and 5s for finalization
+    required: false
   builder-name:
     description: Buildx builder name
     required: false
