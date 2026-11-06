@@ -76,6 +76,25 @@ test("requires an HTTPS endpoint and a capability", () => {
   assert.equal(configuration(environment()).endpoint, "https://sticky.tenki.test");
 });
 
+test("prefers LUXORAI_STICKYDISK_* over TENKI_STICKYDISK_*", async () => {
+  const env = environment({
+    LUXORAI_STICKYDISK_URL: "https://sticky.luxor.test/",
+    LUXORAI_STICKYDISK_TOKEN: "luxor-capability",
+  });
+  assert.deepEqual(configuration(env), { endpoint: "https://sticky.luxor.test", token: "luxor-capability" });
+  assert.deepEqual(configuration(environment({ LUXORAI_STICKYDISK_URL: "" })), {
+    endpoint: "https://sticky.tenki.test",
+    token: "capability",
+  });
+  const lines = [];
+  await runMount({
+    environment: env,
+    write: (line) => lines.push(line),
+    mount: async () => ({ mounted: true, source: "miss", publication: "pending", allocation_id: "a1" }),
+  });
+  assert.deepEqual(lines, ["::add-mask::luxor-capability\n"]);
+});
+
 test("retries delayed assignment responses with one stable idempotency key", async () => {
   let calls = 0;
   let clock = 0;

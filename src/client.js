@@ -17,9 +17,14 @@ class StickyDiskSafeFallbackError extends StickyDiskError {}
 const EXPLICIT_FALLBACK_CODES = new Set(["allocation_disabled", "key_disabled", "quota_exceeded", "storage_disabled"]);
 const MOUNT_SOURCES = new Set(["hit", "miss", "readonly", "fallback"]);
 
+// The runner capability, read from LUXORAI_STICKYDISK_* first, then TENKI_STICKYDISK_*.
+function stickyDiskToken(environment = process.env) {
+  return environment.LUXORAI_STICKYDISK_TOKEN || environment.TENKI_STICKYDISK_TOKEN;
+}
+
 function configuration(environment = process.env) {
-  const url = environment.TENKI_STICKYDISK_URL;
-  const token = environment.TENKI_STICKYDISK_TOKEN;
+  const url = environment.LUXORAI_STICKYDISK_URL || environment.TENKI_STICKYDISK_URL;
+  const token = stickyDiskToken(environment);
   if (!url || !token) throw new StickyDiskError("Sticky disk capability is unavailable on this runner");
 
   let endpoint;
@@ -271,5 +276,6 @@ module.exports = {
   mount,
   request,
   responseBody,
+  stickyDiskToken,
   validResponse,
 };
