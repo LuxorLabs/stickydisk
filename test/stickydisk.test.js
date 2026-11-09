@@ -561,6 +561,30 @@ test("a publisher auto mount saves publication intent", async () => {
   assert.equal(fs.readFileSync(env.GITHUB_STATE, "utf8"), "allocation_id=allocation-1\ncommit_intent=true\n");
 });
 
+test("a publisher the quota refuses mounts its cache and warns that it will not publish", async () => {
+  const env = environment();
+  const lines = [];
+  const fields = await runMount({
+    environment: env,
+    write: (line) => lines.push(line),
+    mount: async () => ({
+      mounted: true,
+      source: "readonly",
+      generation: 7,
+      allocation_id: "allocation-1",
+      publication: "refused",
+      publication_refusal: "storage_limit",
+    }),
+  });
+  assert.equal(fields.publicationRefusal, "storage_limit");
+  assert.deepEqual(lines, [
+    "::add-mask::capability\n",
+    "::warning::Sticky disk npm-cache will not publish this job's changes (storage_limit)\n",
+  ]);
+  assert.match(fs.readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /- Publication: refused \(storage_limit\)/);
+  assert.equal(fs.readFileSync(env.GITHUB_STATE, "utf8"), "allocation_id=allocation-1\ncommit_intent=false\n");
+});
+
 test("Branch Protection consumers finalize auto mounts without publication", async () => {
   for (const response of [
     { mounted: true, source: "miss", allocation_id: "consumer-miss", publication: "not_requested" },

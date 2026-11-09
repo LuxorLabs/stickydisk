@@ -32,6 +32,7 @@ Storage loss after attachment can cancel the owning job to prevent publication o
 
 The action writes `mounted`, `source`, and `generation` outputs.
 Its job summary includes the mount mode, generation, fallback reason, previous candidate outcome, and publication state.
+When storage cannot take a new version, the job still mounts the cache and the action warns that its changes will not be published, naming the reason.
 
 ## Releases
 

@@ -71,6 +71,10 @@ function maskSecret(value, write = (line) => process.stdout.write(line)) {
   if (secret) write(`::add-mask::${secret}\n`);
 }
 
+function warning(message, write = (line) => process.stdout.write(line)) {
+  write(`::warning::${safeValue(message)}\n`);
+}
+
 function summary(lines, environment = process.env) {
   if (!environment.GITHUB_STEP_SUMMARY) return;
   fs.appendFileSync(environment.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`, "utf8");
@@ -105,4 +109,5 @@ module.exports = {
   setOutput,
   stateDirectory,
   summary,
+  warning,
 };

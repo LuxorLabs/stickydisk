@@ -9,6 +9,7 @@ const {
   saveState,
   setOutput,
   summary,
+  warning,
 } = require("./action");
 const {
   StickyDiskAmbiguousMountError,
@@ -42,6 +43,7 @@ function responseFields(response) {
     fallbackReason: typeof response.fallback_reason === "string" ? response.fallback_reason : "",
     previousOutcome: typeof response.previous_outcome === "string" ? response.previous_outcome : "",
     publication: typeof response.publication === "string" ? response.publication : "pending",
+    publicationRefusal: typeof response.publication_refusal === "string" ? response.publication_refusal : "",
   };
 }
 
@@ -55,7 +57,8 @@ function mountSummary(fields, environment = process.env) {
   const lines = ["### Sticky disk", `- Mount mode: ${fields.source}`, `- Generation: ${fields.generation || "none"}`];
   if (fields.fallbackReason) lines.push(`- Fallback reason: ${fields.fallbackReason}`);
   if (fields.previousOutcome) lines.push(`- Previous candidate: ${fields.previousOutcome}`);
-  lines.push(`- Publication: ${fields.publication}`);
+  const refusal = fields.publicationRefusal ? ` (${fields.publicationRefusal})` : "";
+  lines.push(`- Publication: ${fields.publication}${refusal}`);
   summary(lines, environment);
 }
 
@@ -79,6 +82,12 @@ async function runMount(options = {}) {
     if (fields.mounted && fields.allocationId) {
       saveState("allocation_id", fields.allocationId, environment);
       saveState("commit_intent", commit === "auto" && fields.publication === "pending", environment);
+    }
+    if (fields.publicationRefusal) {
+      warning(
+        `Sticky disk ${request.key} will not publish this job's changes (${fields.publicationRefusal})`,
+        options.write,
+      );
     }
     mountSummary(fields, environment);
     return fields;
