@@ -17,6 +17,7 @@ const {
   StickyDiskError,
   finalize,
   mount,
+  stickyDiskTokens,
 } = require("./client");
 
 const SOURCES = new Set(["hit", "miss", "readonly", "fallback"]);
@@ -64,7 +65,7 @@ function mountSummary(fields, environment = process.env) {
 
 async function runMount(options = {}) {
   const environment = options.environment || process.env;
-  maskSecret(environment.TENKI_STICKYDISK_TOKEN, options.write);
+  for (const token of stickyDiskTokens(environment)) maskSecret(token, options.write);
   const client = options.mount || mount;
   const failOnError = booleanInput("fail-on-error", environment);
   const commit = commitInput(environment);
@@ -125,7 +126,7 @@ async function runMount(options = {}) {
 
 async function runFinalize(options = {}) {
   const environment = options.environment || process.env;
-  maskSecret(environment.TENKI_STICKYDISK_TOKEN, options.write);
+  for (const token of stickyDiskTokens(environment)) maskSecret(token, options.write);
   const allocationId = environment.STATE_allocation_id;
   if (!allocationId) return null;
   const commitIntent = options.commitIntent ?? environment.STATE_commit_intent === "true";
