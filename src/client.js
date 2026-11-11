@@ -14,7 +14,7 @@ class StickyDiskDegradedError extends StickyDiskError {}
 class StickyDiskAmbiguousMountError extends StickyDiskError {}
 class StickyDiskSafeFallbackError extends StickyDiskError {}
 
-const EXPLICIT_FALLBACK_CODES = new Set(["allocation_disabled", "key_disabled", "quota_exceeded", "storage_disabled"]);
+const EXPLICIT_FALLBACK_CODES = new Set(["allocation_disabled", "key_disabled"]);
 const MOUNT_SOURCES = new Set(["hit", "miss", "readonly", "fallback"]);
 
 // Reads LUXORAI_STICKYDISK_<name> when non-empty, else TENKI_STICKYDISK_<name>.

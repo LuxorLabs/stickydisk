@@ -508,7 +508,7 @@ test("an earlier ambiguous mount remains ambiguous through a safe response", asy
         fetchImpl: async () => {
           calls += 1;
           if (calls === 1) throw new Error("network failure");
-          return Response.json({ code: "quota_exceeded" }, { status: 409 });
+          return Response.json({ code: "key_disabled" }, { status: 503 });
         },
       },
     ),
@@ -581,16 +581,25 @@ test("a timed-out mount waits for confirmed cleanup before using local storage",
 
 test("explicit pre-attachment allocation failures still fall back", async () => {
   const env = environment();
+  let calls = 0;
   const fields = await runMount({
     environment: env,
     mount: () =>
       request(
         "/v1/stickydisk/mount",
         {},
-        { environment: env, fetchImpl: async () => Response.json({ code: "quota_exceeded" }, { status: 409 }) },
+        {
+          environment: env,
+          fetchImpl: async () => {
+            calls += 1;
+            return Response.json({ code: "allocation_disabled" }, { status: 503 });
+          },
+        },
       ),
   });
   assert.equal(fields.source, "fallback");
+  assert.equal(fields.fallbackReason, "storage unavailable");
+  assert.equal(calls, 1);
 });
 
 test("a publisher auto mount saves publication intent", async () => {
