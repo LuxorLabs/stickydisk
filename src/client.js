@@ -17,13 +17,13 @@ class StickyDiskSafeFallbackError extends StickyDiskError {}
 const EXPLICIT_FALLBACK_CODES = new Set(["allocation_disabled", "key_disabled"]);
 const MOUNT_SOURCES = new Set(["hit", "miss", "readonly", "fallback"]);
 
-// Reads LUXORAI_STICKYDISK_<name> when non-empty, else TENKI_STICKYDISK_<name>.
+// Reads LUXOR_STICKYDISK_<name> when non-empty, else TENKI_STICKYDISK_<name>.
 function stickyDiskSetting(name, environment = process.env) {
-  return environment[`LUXORAI_STICKYDISK_${name}`] || environment[`TENKI_STICKYDISK_${name}`];
+  return environment[`LUXOR_STICKYDISK_${name}`] || environment[`TENKI_STICKYDISK_${name}`];
 }
 
 function stickyDiskTokens(environment = process.env) {
-  return [...new Set([environment.LUXORAI_STICKYDISK_TOKEN, environment.TENKI_STICKYDISK_TOKEN].filter(Boolean))];
+  return [...new Set([environment.LUXOR_STICKYDISK_TOKEN, environment.TENKI_STICKYDISK_TOKEN].filter(Boolean))];
 }
 
 function configuration(environment = process.env) {

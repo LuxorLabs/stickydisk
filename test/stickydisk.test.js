@@ -91,32 +91,32 @@ async function maskedLines(env) {
   return lines;
 }
 
-test("reads LUXORAI_STICKYDISK_* when only those are set", async () => {
+test("reads LUXOR_STICKYDISK_* when only those are set", async () => {
   const env = environment({
     TENKI_STICKYDISK_URL: undefined,
     TENKI_STICKYDISK_TOKEN: undefined,
-    LUXORAI_STICKYDISK_URL: "https://sticky.luxor.test/",
-    LUXORAI_STICKYDISK_TOKEN: "luxor-capability",
+    LUXOR_STICKYDISK_URL: "https://sticky.luxor.test/",
+    LUXOR_STICKYDISK_TOKEN: "luxor-capability",
   });
   assert.deepEqual(configuration(env), { endpoint: "https://sticky.luxor.test", token: "luxor-capability" });
   assert.deepEqual(await maskedLines(env), ["::add-mask::luxor-capability\n", "::add-mask::luxor-capability\n"]);
 });
 
-test("reads TENKI_STICKYDISK_* when LUXORAI_STICKYDISK_* are unset or empty", async () => {
+test("reads TENKI_STICKYDISK_* when LUXOR_STICKYDISK_* are unset or empty", async () => {
   const expected = { endpoint: "https://sticky.tenki.test", token: "capability" };
   assert.deepEqual(configuration(environment()), expected);
-  const empty = environment({ LUXORAI_STICKYDISK_URL: "", LUXORAI_STICKYDISK_TOKEN: "" });
+  const empty = environment({ LUXOR_STICKYDISK_URL: "", LUXOR_STICKYDISK_TOKEN: "" });
   assert.deepEqual(configuration(empty), expected);
   assert.deepEqual(await maskedLines(empty), ["::add-mask::capability\n", "::add-mask::capability\n"]);
 });
 
-test("prefers LUXORAI_STICKYDISK_* per setting and masks both tokens", async () => {
+test("prefers LUXOR_STICKYDISK_* per setting and masks both tokens", async () => {
   const env = environment({
-    LUXORAI_STICKYDISK_URL: "https://sticky.luxor.test/",
-    LUXORAI_STICKYDISK_TOKEN: "luxor-capability",
+    LUXOR_STICKYDISK_URL: "https://sticky.luxor.test/",
+    LUXOR_STICKYDISK_TOKEN: "luxor-capability",
   });
   assert.deepEqual(configuration(env), { endpoint: "https://sticky.luxor.test", token: "luxor-capability" });
-  assert.deepEqual(configuration(environment({ LUXORAI_STICKYDISK_TOKEN: "luxor-capability" })), {
+  assert.deepEqual(configuration(environment({ LUXOR_STICKYDISK_TOKEN: "luxor-capability" })), {
     endpoint: "https://sticky.tenki.test",
     token: "luxor-capability",
   });
